@@ -131,8 +131,8 @@ struct ClockView: View {
                 Text(timeText)
                     .font(.system(size: textSize, weight: .semibold, design: .monospaced))
                     .monospacedDigit()
-                    .padding(.horizontal, 4) // padding
-                    .padding(.vertical, 4)
+                    .padding(.horizontal, 0) // padding
+                    .padding(.vertical, 10)
             }
         }
         .opacity(opacity)
