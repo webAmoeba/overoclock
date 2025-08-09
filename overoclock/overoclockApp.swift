@@ -2,7 +2,9 @@ import SwiftUI
 import AppKit
 
 // MARK: - Notifications
-extension Notification.Name { static let clockContentChanged = Notification.Name("clockContentChanged") }
+extension Notification.Name {
+    static let clockContentChanged = Notification.Name("clockContentChanged")
+}
 
 @main
 struct FloatingClockApp: App {
@@ -10,7 +12,7 @@ struct FloatingClockApp: App {
     var body: some Scene { Settings { EmptyView() } }
 }
 
-// MARK: - App Delegate with menu-bar controls
+// MARK: - AppDelegate (menu bar + floating panel)
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var panel: TransparentPanel?
     private var host: NSHostingView<ClockView>?
@@ -18,21 +20,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     // Shared keys with SwiftUI @AppStorage
     private let kShowSeconds = "showSeconds"
-    private let kUse24h = "use24h"
-    private let kTextSize = "textSize"
-    private let kOpacity = "opacity"      // background opacity for black pill
+    private let kUse24h      = "use24h"
+    private let kTextSize    = "textSize"
+    private let kOpacity     = "opacity"      // black background opacity
     private let kClickThrough = "clickThrough"
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Hide from Dock, keep menu-bar presence
         NSApp.setActivationPolicy(.accessory)
 
-        // Menu bar status item
+        // Menu bar item
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem.button?.title = "🕒"
         rebuildMenu()
 
-        // Floating panel across all spaces / full screen
+        // Floating panel (across all spaces, on top of full-screen apps)
         let panel = TransparentPanel(
             contentRect: NSRect(x: 80, y: 80, width: 120, height: 30),
             styleMask: [.nonactivatingPanel, .borderless],
@@ -51,24 +53,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // SwiftUI host
         let host = NSHostingView(rootView: ClockView())
         host.translatesAutoresizingMaskIntoConstraints = false
-        panel.contentView = NSView()
-        panel.contentView?.addSubview(host)
+        let container = NSView()
+        panel.contentView = container
+        container.addSubview(host)
         NSLayoutConstraint.activate([
-            host.leadingAnchor.constraint(equalTo: panel.contentView!.leadingAnchor),
-            host.trailingAnchor.constraint(equalTo: panel.contentView!.trailingAnchor),
-            host.topAnchor.constraint(equalTo: panel.contentView!.topAnchor),
-            host.bottomAnchor.constraint(equalTo: panel.contentView!.bottomAnchor)
+            host.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            host.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            host.topAnchor.constraint(equalTo: container.topAnchor),
+            host.bottomAnchor.constraint(equalTo: container.bottomAnchor)
         ])
 
         self.panel = panel
         self.host = host
 
-        // Auto-fit on any content/setting change
+        // Auto-fit + reposition hooks
         NotificationCenter.default.addObserver(self, selector: #selector(resizeToFit), name: .clockContentChanged, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(screenParamsChanged), name: NSApplication.didChangeScreenParametersNotification, object: nil)
 
         panel.makeKeyAndOrderFront(nil)
         resizeToFit()
+        positionTopRight()
         applyClickThrough()
+    }
+
+    // MARK: - Positioning
+    private func positionTopRight(marginX: CGFloat = 0, marginY: CGFloat = 0) {
+        guard let panel = panel else { return }
+        let screen = panel.screen ?? NSScreen.main ?? NSScreen.screens.first
+        guard let vf = screen?.frame else { return }
+        let size = panel.frame.size
+        let x = vf.maxX - size.width - marginX
+        let y = vf.maxY - size.height - marginY
+        panel.setFrameOrigin(NSPoint(x: x, y: y))
+    }
+
+    @objc private func screenParamsChanged() {
+        resizeToFit()
+        positionTopRight()
     }
 
     // MARK: - Menu
@@ -88,6 +109,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         secItem.state = d.bool(forKey: kShowSeconds) ? .on : .off
         menu.addItem(secItem)
 
+        // Font size submenu
         let fontMenu = NSMenu(title: "Размер шрифта")
         fontMenu.addItem(NSMenuItem(title: "Увеличить (+)", action: #selector(fontIncrease), keyEquivalent: "+"))
         fontMenu.addItem(NSMenuItem(title: "Уменьшить (−)", action: #selector(fontDecrease), keyEquivalent: "-"))
@@ -96,6 +118,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.setSubmenu(fontMenu, for: fontParent)
         menu.addItem(fontParent)
 
+        // Opacity submenu
         let opMenu = NSMenu(title: "Непрозрачность фона")
         opMenu.addItem(NSMenuItem(title: "Больше", action: #selector(opacityIncrease), keyEquivalent: ""))
         opMenu.addItem(NSMenuItem(title: "Меньше", action: #selector(opacityDecrease), keyEquivalent: ""))
@@ -105,7 +128,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.setSubmenu(opMenu, for: opParent)
         menu.addItem(opParent)
 
-        let ctItem = NSMenuItem(title: "Клик‑сквозь (не перехватывать клики)", action: #selector(toggleClickThrough), keyEquivalent: "")
+        // Click-through toggle
+        let ctItem = NSMenuItem(title: "Клик-сквозь (не перехватывать клики)", action: #selector(toggleClickThrough), keyEquivalent: "")
         ctItem.state = d.bool(forKey: kClickThrough) ? .on : .off
         menu.addItem(ctItem)
 
@@ -122,11 +146,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard let panel = panel else { return }
         if panel.isVisible { panel.orderOut(nil) } else { panel.makeKeyAndOrderFront(nil) }
     }
+
     @objc private func toggleUse24h() {
         let d = UserDefaults.standard
         d.set(!d.bool(forKey: kUse24h), forKey: kUse24h)
         NotificationCenter.default.post(name: .clockContentChanged, object: nil)
     }
+
     @objc private func toggleSeconds() {
         let d = UserDefaults.standard
         d.set(!d.bool(forKey: kShowSeconds), forKey: kShowSeconds)
@@ -149,12 +175,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func opacityIncrease() { adjustOpacity(by: +0.05) }
     @objc private func opacityDecrease() { adjustOpacity(by: -0.05) }
     @objc private func opacityReset() {
-        UserDefaults.standard.set(0.85, forKey: kOpacity)
+        UserDefaults.standard.set(1.0, forKey: kOpacity)
         NotificationCenter.default.post(name: .clockContentChanged, object: nil)
     }
     private func adjustOpacity(by delta: Double) {
         let d = UserDefaults.standard
-        let v = min(1.0, max(0.1, d.double(forKey: kOpacity).nonZeroOr(0.85) + delta))
+        let v = min(1.0, max(0.1, d.double(forKey: kOpacity).nonZeroOr(1.0) + delta))
         d.set(v, forKey: kOpacity)
         NotificationCenter.default.post(name: .clockContentChanged, object: nil)
     }
@@ -179,30 +205,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         size.width = max(size.width, 30)
         size.height = max(size.height, 20)
         panel.setContentSize(size)
+        positionTopRight()
     }
 }
 
+// MARK: - Helpers
 private extension Double { func nonZeroOr(_ v: Double) -> Double { self == 0 ? v : self } }
 
-// MARK: - Transparent floating panel
 final class TransparentPanel: NSPanel {
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { false }
 }
 
-// MARK: - SwiftUI View (black background + white text)
+// MARK: - SwiftUI view (black pill, white mono text)
 struct ClockView: View {
     @State private var now = Date()
     @AppStorage("showSeconds") private var showSeconds: Bool = false
-    @AppStorage("use24h") private var use24h: Bool = true
-    @AppStorage("textSize") private var textSize: Double = 14
-    @AppStorage("opacity") private var opacity: Double = 1.0   // black background opacity
+    @AppStorage("use24h")     private var use24h: Bool = true
+    @AppStorage("textSize")   private var textSize: Double = 14
+    @AppStorage("opacity")    private var opacity: Double = 1.0   // default: fully black
     @AppStorage("clickThrough") private var clickThrough: Bool = false
 
     private var timeFormatter: DateFormatter {
         let f = DateFormatter()
         f.locale = Locale.current
-        f.dateFormat = use24h ? (showSeconds ? "HH:mm:ss" : "HH:mm") : (showSeconds ? "h:mm:ss a" : "h:mm a")
+        f.dateFormat = use24h ? (showSeconds ? "HH:mm:ss" : "HH:mm")
+                              : (showSeconds ? "h:mm:ss a" : "h:mm a")
         return f
     }
     private var timeText: String { timeFormatter.string(from: now) }
@@ -223,7 +251,7 @@ struct ClockView: View {
             NotificationCenter.default.post(name: .clockContentChanged, object: nil)
         }
         .onChange(of: textSize) { _, _ in NotificationCenter.default.post(name: .clockContentChanged, object: nil) }
-        .onChange(of: use24h) { _, _ in NotificationCenter.default.post(name: .clockContentChanged, object: nil) }
+        .onChange(of: use24h)   { _, _ in NotificationCenter.default.post(name: .clockContentChanged, object: nil) }
         .onChange(of: showSeconds) { _, _ in NotificationCenter.default.post(name: .clockContentChanged, object: nil) }
         .onAppear {
             setIgnoresMouseEvents(clickThrough)
