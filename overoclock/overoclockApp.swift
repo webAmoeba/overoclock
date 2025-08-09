@@ -2,9 +2,7 @@ import SwiftUI
 import AppKit
 
 // MARK: - Notifications
-extension Notification.Name {
-    static let clockContentChanged = Notification.Name("clockContentChanged")
-}
+extension Notification.Name { static let clockContentChanged = Notification.Name("clockContentChanged") }
 
 @main
 struct FloatingClockApp: App {
@@ -12,18 +10,22 @@ struct FloatingClockApp: App {
     var body: some Scene { Settings { EmptyView() } }
 }
 
-// MARK: - AppDelegate (menu bar + floating panel)
-final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
+// MARK: - App Delegate (menu bar + floating panel + position memory)
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDelegate {
     private var panel: TransparentPanel?
     private var host: NSHostingView<ClockView>?
     private var statusItem: NSStatusItem!
 
     // Shared keys with SwiftUI @AppStorage
-    private let kShowSeconds = "showSeconds"
-    private let kUse24h      = "use24h"
-    private let kTextSize    = "textSize"
-    private let kOpacity     = "opacity"      // black background opacity
-    private let kClickThrough = "clickThrough"
+    private let kShowSeconds   = "showSeconds"
+    private let kUse24h        = "use24h"
+    private let kTextSize      = "textSize"
+    private let kOpacity       = "opacity"      // black background opacity
+    private let kClickThrough  = "clickThrough"
+    // Position persistence
+    private let kPosX          = "posX"
+    private let kPosY          = "posY"
+    private let kUseCustomPos  = "useCustomPos"
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Hide from Dock, keep menu-bar presence
@@ -49,6 +51,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         panel.isFloatingPanel = true
         panel.level = .statusBar
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
+        panel.delegate = self
 
         // SwiftUI host
         let host = NSHostingView(rootView: ClockView())
@@ -72,24 +75,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         panel.makeKeyAndOrderFront(nil)
         resizeToFit()
-        positionTopRight()
+        if !restorePositionIfAvailable() { positionTopRight() }
         applyClickThrough()
     }
 
     // MARK: - Positioning
-    private func positionTopRight(marginX: CGFloat = 0, marginY: CGFloat = 0) {
-        guard let panel = panel else { return }
+    @discardableResult
+    private func positionTopRight(marginX: CGFloat = 0, marginY: CGFloat = 0) -> Bool {
+        guard let panel = panel else { return false }
         let screen = panel.screen ?? NSScreen.main ?? NSScreen.screens.first
-        guard let vf = screen?.frame else { return }
+        guard let f = screen?.frame else { return false }
         let size = panel.frame.size
-        let x = vf.maxX - size.width - marginX
-        let y = vf.maxY - size.height - marginY
+        let x = f.maxX - size.width - marginX
+        let y = f.maxY - size.height - marginY
         panel.setFrameOrigin(NSPoint(x: x, y: y))
+        return true
     }
 
     @objc private func screenParamsChanged() {
         resizeToFit()
-        positionTopRight()
+        let d = UserDefaults.standard
+        if d.bool(forKey: kUseCustomPos) {
+            if !restorePositionIfAvailable() { _ = positionTopRight() }
+        } else {
+            _ = positionTopRight()
+        }
     }
 
     // MARK: - Menu
@@ -129,9 +139,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(opParent)
 
         // Click-through toggle
-        let ctItem = NSMenuItem(title: "Клик-сквозь (не перехватывать клики)", action: #selector(toggleClickThrough), keyEquivalent: "")
+        let ctItem = NSMenuItem(title: "Клик‑сквозь (не перехватывать клики)", action: #selector(toggleClickThrough), keyEquivalent: "")
         ctItem.state = d.bool(forKey: kClickThrough) ? .on : .off
         menu.addItem(ctItem)
+
+        // Position controls
+        menu.addItem(.separator())
+        menu.addItem(withTitle: "Сбросить положение (правый верх)", action: #selector(resetPositionTopRight), keyEquivalent: "")
 
         menu.addItem(.separator())
         menu.addItem(withTitle: "Выход", action: #selector(quit), keyEquivalent: "q")
@@ -146,13 +160,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard let panel = panel else { return }
         if panel.isVisible { panel.orderOut(nil) } else { panel.makeKeyAndOrderFront(nil) }
     }
-
     @objc private func toggleUse24h() {
         let d = UserDefaults.standard
         d.set(!d.bool(forKey: kUse24h), forKey: kUse24h)
         NotificationCenter.default.post(name: .clockContentChanged, object: nil)
     }
-
     @objc private func toggleSeconds() {
         let d = UserDefaults.standard
         d.set(!d.bool(forKey: kShowSeconds), forKey: kShowSeconds)
@@ -204,8 +216,57 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         size.height = ceil(size.height)
         size.width = max(size.width, 30)
         size.height = max(size.height, 20)
+        let d = UserDefaults.standard
+        let hadCustom = d.bool(forKey: kUseCustomPos)
+        let oldOrigin = panel.frame.origin
         panel.setContentSize(size)
-        positionTopRight()
+        if hadCustom {
+            panel.setFrameOrigin(NSPoint(x: oldOrigin.x, y: oldOrigin.y))
+        } else {
+            _ = positionTopRight()
+        }
+    }
+
+    // MARK: - Position persistence
+    private func savePosition() {
+        guard let panel = panel else { return }
+        let o = panel.frame.origin
+        let d = UserDefaults.standard
+        d.set(Double(o.x), forKey: kPosX)
+        d.set(Double(o.y), forKey: kPosY)
+        d.set(true, forKey: kUseCustomPos)
+    }
+
+    @discardableResult
+    private func restorePositionIfAvailable() -> Bool {
+        let d = UserDefaults.standard
+        guard d.bool(forKey: kUseCustomPos) else { return false }
+        guard let x = d.object(forKey: kPosX) as? Double,
+              let y = d.object(forKey: kPosY) as? Double else { return false }
+        let pt = NSPoint(x: x, y: y)
+        if isPointOnAnyScreen(pt) {
+            panel?.setFrameOrigin(pt)
+            return true
+        }
+        return false
+    }
+
+    private func isPointOnAnyScreen(_ p: NSPoint) -> Bool {
+        for s in NSScreen.screens { if s.frame.contains(p) { return true } }
+        return false
+    }
+
+    @objc private func resetPositionTopRight() {
+        let d = UserDefaults.standard
+        d.removeObject(forKey: kPosX)
+        d.removeObject(forKey: kPosY)
+        d.set(false, forKey: kUseCustomPos)
+        _ = positionTopRight()
+    }
+
+    // NSWindowDelegate — track user dragging and persist position
+    func windowDidMove(_ notification: Notification) {
+        savePosition()
     }
 }
 
@@ -250,9 +311,9 @@ struct ClockView: View {
             now = Date()
             NotificationCenter.default.post(name: .clockContentChanged, object: nil)
         }
-        .onChange(of: textSize) { _, _ in NotificationCenter.default.post(name: .clockContentChanged, object: nil) }
-        .onChange(of: use24h)   { _, _ in NotificationCenter.default.post(name: .clockContentChanged, object: nil) }
-        .onChange(of: showSeconds) { _, _ in NotificationCenter.default.post(name: .clockContentChanged, object: nil) }
+        .onChange(of: textSize)   { _, _ in NotificationCenter.default.post(name: .clockContentChanged, object: nil) }
+        .onChange(of: use24h)     { _, _ in NotificationCenter.default.post(name: .clockContentChanged, object: nil) }
+        .onChange(of: showSeconds){ _, _ in NotificationCenter.default.post(name: .clockContentChanged, object: nil) }
         .onAppear {
             setIgnoresMouseEvents(clickThrough)
             NotificationCenter.default.post(name: .clockContentChanged, object: nil)
@@ -265,4 +326,3 @@ struct ClockView: View {
         }
     }
 }
-
