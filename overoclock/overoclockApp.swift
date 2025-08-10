@@ -17,15 +17,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     private var statusItem: NSStatusItem!
 
     // Shared keys with SwiftUI @AppStorage
-    private let kShowSeconds   = "showSeconds"
-    private let kUse24h        = "use24h"
-    private let kTextSize      = "textSize"
-    private let kOpacity       = "opacity"      // black background opacity
-    private let kClickThrough  = "clickThrough"
+    private let kShowSeconds    = "showSeconds"
+    private let kUse24h         = "use24h"
+    private let kTextSize       = "textSize"
+    private let kOpacity        = "opacity"      // black background opacity
+    private let kClickThrough   = "clickThrough"
     // Position persistence
-    private let kPosX          = "posX"
-    private let kPosY          = "posY"
-    private let kUseCustomPos  = "useCustomPos"
+    private let kPosX           = "posX"
+    private let kPosY           = "posY"
+    private let kUseCustomPos   = "useCustomPos"
+    // Pinning
+    private let kPinnedTopRight = "pinnedTopRight"
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Hide from Dock, keep menu-bar presence
@@ -75,24 +77,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
 
         panel.makeKeyAndOrderFront(nil)
         resizeToFit()
-        if !restorePositionIfAvailable() { snapTopRightAsync() }
+        // Launch behavior: if pinned, force top-right; else restore or snap.
+        let d = UserDefaults.standard
+        if d.object(forKey: kPinnedTopRight) == nil { d.set(true, forKey: kPinnedTopRight) } // default ON
+        if d.bool(forKey: kPinnedTopRight) {
+            resetPositionTopRight()
+        } else if !restorePositionIfAvailable() {
+            snapTopRightReliably()
+        }
         applyClickThrough()
+        updateDraggability()
     }
 
     // MARK: - Positioning
-    private func snapTopRightAsync() { DispatchQueue.main.async { _ = self.positionTopRight() } }
+    private func targetScreen() -> NSScreen? {
+        if let s = panel?.screen { return s }
+        let mouse = NSEvent.mouseLocation
+        if let byMouse = NSScreen.screens.first(where: { $0.frame.contains(mouse) }) { return byMouse }
+        return NSScreen.main ?? NSScreen.screens.first
+    }
+
+    private func snapTopRightReliably() {
+        // Do a few passes to outlive any async layout/space switches
+        _ = positionTopRight()
+        DispatchQueue.main.async { _ = self.positionTopRight() }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { _ = self.positionTopRight() }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { _ = self.positionTopRight() }
+    }
 
     @discardableResult
     private func positionTopRight(marginX: CGFloat = 0, marginY: CGFloat = 0) -> Bool {
-        guard let panel = panel else { return false }
-        // Prefer the panel's own screen → screen under mouse → main
-        let screen: NSScreen? = {
-            if let s = panel.screen { return s }
-            let mouse = NSEvent.mouseLocation
-            if let byMouse = NSScreen.screens.first(where: { $0.frame.contains(mouse) }) { return byMouse }
-            return NSScreen.main ?? NSScreen.screens.first
-        }()
-        guard let f = screen?.frame else { return false }
+        guard let panel = panel, let f = targetScreen()?.frame else { return false }
         let size = panel.frame.size
         let x = f.maxX - size.width - marginX
         let y = f.maxY - size.height - marginY
@@ -103,10 +118,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     @objc private func screenParamsChanged() {
         resizeToFit()
         let d = UserDefaults.standard
-        if d.bool(forKey: kUseCustomPos) {
-            if !restorePositionIfAvailable() { snapTopRightAsync() }
+        if d.bool(forKey: kPinnedTopRight) {
+            resetPositionTopRight() // pins again
+        } else if d.bool(forKey: kUseCustomPos) {
+            if !restorePositionIfAvailable() { snapTopRightReliably() }
         } else {
-            snapTopRightAsync()
+            snapTopRightReliably()
         }
     }
 
@@ -150,6 +167,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         let ctItem = NSMenuItem(title: "Клик‑сквозь (не перехватывать клики)", action: #selector(toggleClickThrough), keyEquivalent: "")
         ctItem.state = d.bool(forKey: kClickThrough) ? .on : .off
         menu.addItem(ctItem)
+
+        // Pinning
+        let pinItem = NSMenuItem(title: "Прибить к правому верхнему (авто)", action: #selector(togglePinned), keyEquivalent: "")
+        pinItem.state = d.bool(forKey: kPinnedTopRight) ? .on : .off
+        menu.addItem(pinItem)
 
         // Position controls
         menu.addItem(.separator())
@@ -214,6 +236,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         panel.ignoresMouseEvents = UserDefaults.standard.bool(forKey: kClickThrough)
     }
 
+    @objc private func togglePinned() {
+        let d = UserDefaults.standard
+        let newVal = !d.bool(forKey: kPinnedTopRight)
+        d.set(newVal, forKey: kPinnedTopRight)
+        updateDraggability()
+        if newVal {
+            // When enabling pin, drop custom pos and snap
+            d.set(false, forKey: kUseCustomPos)
+            resetPositionTopRight()
+        }
+    }
+
+    private func updateDraggability() {
+        let pinned = UserDefaults.standard.bool(forKey: kPinnedTopRight)
+        panel?.isMovableByWindowBackground = !pinned
+    }
+
     @objc private func quit() { NSApp.terminate(nil) }
 
     @objc private func resizeToFit() {
@@ -225,19 +264,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         size.width = max(size.width, 30)
         size.height = max(size.height, 20)
         let d = UserDefaults.standard
+        let pinned = d.bool(forKey: kPinnedTopRight)
         let hadCustom = d.bool(forKey: kUseCustomPos)
         let oldOrigin = panel.frame.origin
         panel.setContentSize(size)
-        if hadCustom {
+        if pinned {
+            snapTopRightReliably()
+        } else if hadCustom {
             panel.setFrameOrigin(NSPoint(x: oldOrigin.x, y: oldOrigin.y))
         } else {
-            snapTopRightAsync()
+            snapTopRightReliably()
         }
     }
 
     // MARK: - Position persistence
     private func savePosition() {
         guard let panel = panel else { return }
+        if UserDefaults.standard.bool(forKey: kPinnedTopRight) { return } // don't save when pinned
         let o = panel.frame.origin
         let d = UserDefaults.standard
         d.set(Double(o.x), forKey: kPosX)
@@ -267,7 +310,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         d.removeObject(forKey: kPosX)
         d.removeObject(forKey: kPosY)
         d.set(false, forKey: kUseCustomPos)
-        snapTopRightAsync()
+        snapTopRightReliably()
     }
 
     // NSWindowDelegate — persist position when user drags
