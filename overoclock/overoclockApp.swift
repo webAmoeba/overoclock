@@ -283,7 +283,7 @@ struct ClockView: View {
     @State private var now = Date()
     @AppStorage("showSeconds") private var showSeconds: Bool = false
     @AppStorage("use24h")     private var use24h: Bool = true
-    @AppStorage("textSize")   private var textSize: Double = 14
+    @AppStorage("textSize")   private var textSize: Double = 16
     @AppStorage("opacity")    private var opacity: Double = 1.0   // default: fully black
     @AppStorage("clickThrough") private var clickThrough: Bool = false
 
