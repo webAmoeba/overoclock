@@ -36,7 +36,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         statusItem.button?.title = "🕒"
         rebuildMenu()
 
-        // Floating panel (across all spaces, on top of full-screen apps)
+        // Floating panel (on top of full-screen spaces)
         let panel = TransparentPanel(
             contentRect: NSRect(x: 80, y: 80, width: 120, height: 30),
             styleMask: [.nonactivatingPanel, .borderless],
@@ -69,21 +69,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         self.panel = panel
         self.host = host
 
-        // Auto-fit + reposition hooks
+        // Observers
         NotificationCenter.default.addObserver(self, selector: #selector(resizeToFit), name: .clockContentChanged, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(screenParamsChanged), name: NSApplication.didChangeScreenParametersNotification, object: nil)
 
         panel.makeKeyAndOrderFront(nil)
         resizeToFit()
-        if !restorePositionIfAvailable() { positionTopRight() }
+        if !restorePositionIfAvailable() { snapTopRightAsync() }
         applyClickThrough()
     }
 
     // MARK: - Positioning
+    private func snapTopRightAsync() { DispatchQueue.main.async { _ = self.positionTopRight() } }
+
     @discardableResult
     private func positionTopRight(marginX: CGFloat = 0, marginY: CGFloat = 0) -> Bool {
         guard let panel = panel else { return false }
-        let screen = panel.screen ?? NSScreen.main ?? NSScreen.screens.first
+        // Prefer the panel's own screen → screen under mouse → main
+        let screen: NSScreen? = {
+            if let s = panel.screen { return s }
+            let mouse = NSEvent.mouseLocation
+            if let byMouse = NSScreen.screens.first(where: { $0.frame.contains(mouse) }) { return byMouse }
+            return NSScreen.main ?? NSScreen.screens.first
+        }()
         guard let f = screen?.frame else { return false }
         let size = panel.frame.size
         let x = f.maxX - size.width - marginX
@@ -96,9 +104,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         resizeToFit()
         let d = UserDefaults.standard
         if d.bool(forKey: kUseCustomPos) {
-            if !restorePositionIfAvailable() { _ = positionTopRight() }
+            if !restorePositionIfAvailable() { snapTopRightAsync() }
         } else {
-            _ = positionTopRight()
+            snapTopRightAsync()
         }
     }
 
@@ -174,12 +182,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     @objc private func fontIncrease() { adjustFont(by: +2) }
     @objc private func fontDecrease() { adjustFont(by: -2) }
     @objc private func fontReset() {
-        UserDefaults.standard.set(14.0, forKey: kTextSize)
+        UserDefaults.standard.set(16.0, forKey: kTextSize)
         NotificationCenter.default.post(name: .clockContentChanged, object: nil)
     }
     private func adjustFont(by delta: Double) {
         let d = UserDefaults.standard
-        let v = min(120.0, max(8.0, d.double(forKey: kTextSize).nonZeroOr(14.0) + delta))
+        let v = min(120.0, max(8.0, d.double(forKey: kTextSize).nonZeroOr(16.0) + delta))
         d.set(v, forKey: kTextSize)
         NotificationCenter.default.post(name: .clockContentChanged, object: nil)
     }
@@ -223,7 +231,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         if hadCustom {
             panel.setFrameOrigin(NSPoint(x: oldOrigin.x, y: oldOrigin.y))
         } else {
-            _ = positionTopRight()
+            snapTopRightAsync()
         }
     }
 
@@ -243,11 +251,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         guard d.bool(forKey: kUseCustomPos) else { return false }
         guard let x = d.object(forKey: kPosX) as? Double,
               let y = d.object(forKey: kPosY) as? Double else { return false }
+        if x < 5 && y < 5 { return false }
         let pt = NSPoint(x: x, y: y)
-        if isPointOnAnyScreen(pt) {
-            panel?.setFrameOrigin(pt)
-            return true
-        }
+        if isPointOnAnyScreen(pt) { panel?.setFrameOrigin(pt); return true }
         return false
     }
 
@@ -261,13 +267,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         d.removeObject(forKey: kPosX)
         d.removeObject(forKey: kPosY)
         d.set(false, forKey: kUseCustomPos)
-        _ = positionTopRight()
+        snapTopRightAsync()
     }
 
-    // NSWindowDelegate — track user dragging and persist position
-    func windowDidMove(_ notification: Notification) {
-        savePosition()
-    }
+    // NSWindowDelegate — persist position when user drags
+    func windowDidMove(_ notification: Notification) { savePosition() }
 }
 
 // MARK: - Helpers
