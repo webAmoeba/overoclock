@@ -330,6 +330,27 @@ final class TransparentPanel: NSPanel {
     override var canBecomeMain: Bool { false }
 }
 
+// MARK: - DateFormatter store (reuse a single instance)
+final class TimeFormatterStore: ObservableObject {
+    @Published private(set) var formatter: DateFormatter
+
+    init(use24h: Bool, showSeconds: Bool, locale: Locale = .current) {
+        let f = DateFormatter()
+        f.locale = locale
+        f.dateFormat = use24h ? (showSeconds ? "HH:mm:ss" : "HH:mm")
+                              : (showSeconds ? "h:mm:ss a" : "h:mm a")
+        self.formatter = f
+    }
+
+    func update(use24h: Bool, showSeconds: Bool, locale: Locale = .current) {
+        let f = DateFormatter()
+        f.locale = locale
+        f.dateFormat = use24h ? (showSeconds ? "HH:mm:ss" : "HH:mm")
+                              : (showSeconds ? "h:mm:ss a" : "h:mm a")
+        self.formatter = f
+    }
+}
+
 // MARK: - SwiftUI view (black pill, white mono text)
 struct ClockView: View {
     @AppStorage("showSeconds")   private var showSeconds: Bool = false
@@ -338,13 +359,7 @@ struct ClockView: View {
     @AppStorage("opacity")       private var opacity: Double = 1.0   // default: fully black
     @AppStorage("clickThrough")  private var clickThrough: Bool = false
 
-    private func timeString(for date: Date) -> String {
-        let f = DateFormatter()
-        f.locale = .current
-        f.dateFormat = use24h ? (showSeconds ? "HH:mm:ss" : "HH:mm")
-                              : (showSeconds ? "h:mm:ss a" : "h:mm a")
-        return f.string(from: date)
-    }
+    @StateObject private var fmt = TimeFormatterStore(use24h: true, showSeconds: false)
 
     var body: some View {
         // Update every second when seconds are visible, otherwise once per minute
@@ -352,7 +367,7 @@ struct ClockView: View {
             ZStack {
                 RoundedRectangle(cornerRadius: 4)
                     .fill(Color.black.opacity(opacity))
-                Text(timeString(for: context.date))
+                Text(fmt.formatter.string(from: context.date))
                     .font(.system(size: textSize, weight: .semibold, design: .monospaced))
                     .monospacedDigit()
                     .foregroundColor(.white)
@@ -362,9 +377,10 @@ struct ClockView: View {
         }
         // Only post when size-affecting settings change
         .onChange(of: textSize)    { _ in NotificationCenter.default.post(name: .clockContentChanged, object: nil) }
-        .onChange(of: use24h)      { _ in NotificationCenter.default.post(name: .clockContentChanged, object: nil) }
-        .onChange(of: showSeconds) { _ in NotificationCenter.default.post(name: .clockContentChanged, object: nil) }
+        .onChange(of: use24h)      { _ in fmt.update(use24h: use24h, showSeconds: showSeconds); NotificationCenter.default.post(name: .clockContentChanged, object: nil) }
+        .onChange(of: showSeconds) { _ in fmt.update(use24h: use24h, showSeconds: showSeconds); NotificationCenter.default.post(name: .clockContentChanged, object: nil) }
         .onAppear {
+            fmt.update(use24h: use24h, showSeconds: showSeconds)
             setIgnoresMouseEvents(clickThrough)
             NotificationCenter.default.post(name: .clockContentChanged, object: nil)
         }
