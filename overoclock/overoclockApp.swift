@@ -30,6 +30,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     private let kUseCustomPos   = "useCustomPos"
     // Pinning
     private let kPinnedTopRight = "pinnedTopRight"
+    // Badge watching mode
+    private let kWatchAnyBadge  = "watchAnyDockBadge"
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Hide from Dock, keep menu-bar presence
@@ -83,6 +85,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         // Launch behavior: if pinned, force top-right; else restore or snap.
         let d = UserDefaults.standard
         if d.object(forKey: kPinnedTopRight) == nil { d.set(true, forKey: kPinnedTopRight) } // default ON
+        if d.object(forKey: kWatchAnyBadge) == nil { d.set(true, forKey: kWatchAnyBadge) }   // default: watch any Dock badge
         if d.bool(forKey: kPinnedTopRight) {
             resetPositionTopRight()
         } else if !restorePositionIfAvailable() {
@@ -176,6 +179,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         pinItem.state = d.bool(forKey: kPinnedTopRight) ? .on : .off
         menu.addItem(pinItem)
 
+        // Watch mode
+        let anyBadgeItem = NSMenuItem(title: "Реагировать на любой бейдж Dock", action: #selector(toggleWatchAnyBadge), keyEquivalent: "")
+        anyBadgeItem.state = d.bool(forKey: kWatchAnyBadge) ? .on : .off
+        menu.addItem(anyBadgeItem)
+
         // Position controls
         menu.addItem(.separator())
         menu.addItem(withTitle: "Сбросить положение (правый верх)", action: #selector(resetPositionTopRight), keyEquivalent: "")
@@ -268,6 +276,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     }
 
     @objc private func quit() { NSApp.terminate(nil) }
+
+    @objc private func toggleWatchAnyBadge() {
+        let d = UserDefaults.standard
+        d.set(!d.bool(forKey: kWatchAnyBadge), forKey: kWatchAnyBadge)
+        badgeWatcher.forceRefresh()
+    }
 
     // MARK: - Diagnostics actions
     @objc private func diagCheckAX() {
@@ -374,6 +388,15 @@ final class DockBadgeWatcher: ObservableObject {
     /// Dock item titles for watched apps (as they appear in Dock via AXTitle)
     var watchedAppTitles: [String] = ["Telegram", "Telegram Desktop", "Телеграм"]
 
+    /// Titles to ignore when watching any Dock badge
+    private let ignoredTitles: [String] = [
+        "Trash", "Корзина",
+        "Downloads", "Загрузки",
+        "Launchpad",
+        "App Store", "Mac App Store",
+        "System Settings", "System Preferences", "Системные настройки"
+    ]
+
     private var timer: Timer?
 
     func start() {
@@ -421,7 +444,8 @@ final class DockBadgeWatcher: ObservableObject {
         return containsBadgedWatchedItem(in: dockAX)
     }
 
-    /// Traverse Dock AX tree: find items whose AXTitle matches watched apps and have non-empty AXStatusLabel (badge)
+    /// Traverse Dock AX tree: find items with non-empty AXStatusLabel (badge).
+    /// In "any" mode we accept any app except ignoredTitles; otherwise match watchedAppTitles/Telegram variants.
     private func containsBadgedWatchedItem(in element: AXUIElement) -> Bool {
         var childrenRef: CFTypeRef?
         let gotChildren = AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &childrenRef)
@@ -436,7 +460,13 @@ final class DockBadgeWatcher: ObservableObject {
             AXUIElementCopyAttributeValue(child, axStatusLabel, &badgeRef)
             let badge = badgeRef as? String
 
-            if !title.isEmpty, matchesWatchedTitle(title), let b = badge, !b.isEmpty { return true }
+            if let b = badge, !b.isEmpty {
+                if watchingAnyBadge() {
+                    if !isIgnoredTitle(title) { return true }
+                } else if !title.isEmpty, matchesWatchedTitle(title) {
+                    return true
+                }
+            }
             if containsBadgedWatchedItem(in: child) { return true }
         }
         return false
@@ -450,6 +480,17 @@ final class DockBadgeWatcher: ObservableObject {
         // Substring match for common variants
         if t.contains("telegram") || t.contains("телеграм") { return true }
         return false
+    }
+
+    private func isIgnoredTitle(_ title: String) -> Bool {
+        let t = title.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if t.isEmpty { return true }
+        for w in ignoredTitles { if t == w.lowercased() { return true } }
+        return false
+    }
+
+    private func watchingAnyBadge() -> Bool {
+        UserDefaults.standard.bool(forKey: "watchAnyDockBadge")
     }
 
     // MARK: - AX debug dump
