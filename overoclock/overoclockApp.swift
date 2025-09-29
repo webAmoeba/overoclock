@@ -348,7 +348,7 @@ struct ClockView: View {
 
     var body: some View {
         // Update every second when seconds are visible, otherwise once per minute
-        TimelineView(showSeconds ? .periodic(from: .now, by: 1) : .everyMinute) { context in
+        TimelineView(.periodic(from: .now, by: showSeconds ? 1 : 60)) { context in
             ZStack {
                 RoundedRectangle(cornerRadius: 4)
                     .fill(Color.black.opacity(opacity))
@@ -361,9 +361,9 @@ struct ClockView: View {
             }
         }
         // Only post when size-affecting settings change
-        .onChange(of: textSize)    { _, _ in NotificationCenter.default.post(name: .clockContentChanged, object: nil) }
-        .onChange(of: use24h)      { _, _ in NotificationCenter.default.post(name: .clockContentChanged, object: nil) }
-        .onChange(of: showSeconds) { _, _ in NotificationCenter.default.post(name: .clockContentChanged, object: nil) }
+        .onChange(of: textSize)    { _ in NotificationCenter.default.post(name: .clockContentChanged, object: nil) }
+        .onChange(of: use24h)      { _ in NotificationCenter.default.post(name: .clockContentChanged, object: nil) }
+        .onChange(of: showSeconds) { _ in NotificationCenter.default.post(name: .clockContentChanged, object: nil) }
         .onAppear {
             setIgnoresMouseEvents(clickThrough)
             NotificationCenter.default.post(name: .clockContentChanged, object: nil)
