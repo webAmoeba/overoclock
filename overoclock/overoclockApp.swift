@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import ApplicationServices // Accessibility (AXUIElement) for reading Dock badges
 
 // MARK: - Notifications
 extension Notification.Name { static let clockContentChanged = Notification.Name("clockContentChanged") }
@@ -15,6 +16,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     private var panel: TransparentPanel?
     private var host: NSHostingView<ClockView>?
     private var statusItem: NSStatusItem!
+    private let badgeWatcher = DockBadgeWatcher()
 
     // Shared keys with SwiftUI @AppStorage
     private let kShowSeconds    = "showSeconds"
@@ -56,7 +58,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         panel.delegate = self
 
         // SwiftUI host
-        let host = NSHostingView(rootView: ClockView())
+        let host = NSHostingView(rootView: ClockView(badge: badgeWatcher))
         host.translatesAutoresizingMaskIntoConstraints = false
         let container = NSView()
         panel.contentView = container
@@ -76,6 +78,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         NotificationCenter.default.addObserver(self, selector: #selector(screenParamsChanged), name: NSApplication.didChangeScreenParametersNotification, object: nil)
 
         panel.makeKeyAndOrderFront(nil)
+        badgeWatcher.start()
         resizeToFit()
         // Launch behavior: if pinned, force top-right; else restore or snap.
         let d = UserDefaults.standard
@@ -317,17 +320,70 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     func windowDidMove(_ notification: Notification) { savePosition() }
 
     deinit {
+        badgeWatcher.stop()
         NotificationCenter.default.removeObserver(self, name: .clockContentChanged, object: nil)
         NotificationCenter.default.removeObserver(self, name: NSApplication.didChangeScreenParametersNotification, object: nil)
     }
 }
 
-// MARK: - Helpers
-private extension Double { func nonZeroOr(_ v: Double) -> Double { self == 0 ? v : self } }
+// MARK: - Dock badge watcher (Accessibility)
+final class DockBadgeWatcher: ObservableObject {
+    @Published var hasAttention: Bool = false
 
-final class TransparentPanel: NSPanel {
-    override var canBecomeKey: Bool { true }
-    override var canBecomeMain: Bool { false }
+    /// Dock item titles for watched apps (as they appear in Dock via AXTitle)
+    var watchedAppTitles: [String] = ["Telegram", "Telegram Desktop", "Телеграм"]
+
+    private var timer: Timer?
+
+    func start() {
+        requestAXIfNeeded()
+        timer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
+            self?.refresh()
+        }
+        if let t = timer { RunLoop.main.add(t, forMode: .common) }
+        refresh()
+    }
+
+    func stop() {
+        timer?.invalidate()
+        timer = nil
+    }
+
+    private func requestAXIfNeeded() {
+        if !AXIsProcessTrusted() {
+            let opts: CFDictionary = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
+            AXIsProcessTrustedWithOptions(opts)
+        }
+    }
+
+    private func refresh() { hasAttention = anyWatchedAppHasBadge() }
+
+    private func anyWatchedAppHasBadge() -> Bool {
+        guard let dock = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.dock").first else { return false }
+        let dockAX = AXUIElementCreateApplication(dock.processIdentifier)
+        return containsBadgedWatchedItem(in: dockAX)
+    }
+
+    /// Traverse Dock AX tree: find items whose AXTitle matches watched apps and have non-empty AXStatusLabel (badge)
+    private func containsBadgedWatchedItem(in element: AXUIElement) -> Bool {
+        var childrenRef: CFTypeRef?
+        let gotChildren = AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &childrenRef)
+        guard gotChildren == .success, let children = childrenRef as? [AXUIElement] else { return false }
+        for child in children {
+            var titleRef: CFTypeRef?
+            AXUIElementCopyAttributeValue(child, kAXTitleAttribute as CFString, &titleRef)
+            let title = (titleRef as? String) ?? ""
+
+            var badgeRef: CFTypeRef?
+            let axStatusLabel: CFString = "AXStatusLabel" as CFString
+            AXUIElementCopyAttributeValue(child, axStatusLabel, &badgeRef)
+            let badge = badgeRef as? String
+
+            if !title.isEmpty, watchedAppTitles.contains(title), let b = badge, !b.isEmpty { return true }
+            if containsBadgedWatchedItem(in: child) { return true }
+        }
+        return false
+    }
 }
 
 // MARK: - DateFormatter store (reuse a single instance)
@@ -351,22 +407,35 @@ final class TimeFormatterStore: ObservableObject {
     }
 }
 
+// MARK: - Helpers
+private extension Double { func nonZeroOr(_ v: Double) -> Double { self == 0 ? v : self } }
+
+final class TransparentPanel: NSPanel {
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { false }
+}
+
 // MARK: - SwiftUI view (black pill, white mono text)
 struct ClockView: View {
+    @ObservedObject var badge: DockBadgeWatcher
     @AppStorage("showSeconds")   private var showSeconds: Bool = false
     @AppStorage("use24h")        private var use24h: Bool = true
     @AppStorage("textSize")      private var textSize: Double = 16
     @AppStorage("opacity")       private var opacity: Double = 1.0   // default: fully black
     @AppStorage("clickThrough")  private var clickThrough: Bool = false
-
     @StateObject private var fmt = TimeFormatterStore(use24h: true, showSeconds: false)
+
+    init(badge: DockBadgeWatcher) {
+        self.badge = badge
+    }
+
 
     var body: some View {
         // Update every second when seconds are visible, otherwise once per minute
         TimelineView(.periodic(from: .now, by: showSeconds ? 1 : 60)) { context in
             ZStack {
                 RoundedRectangle(cornerRadius: 4)
-                    .fill(Color.black.opacity(opacity))
+                    .fill(badge.hasAttention ? Color.red : Color.black.opacity(opacity))
                 Text(fmt.formatter.string(from: context.date))
                     .font(.system(size: textSize, weight: .semibold, design: .monospaced))
                     .monospacedDigit()
