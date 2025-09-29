@@ -180,6 +180,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         menu.addItem(.separator())
         menu.addItem(withTitle: "Сбросить положение (правый верх)", action: #selector(resetPositionTopRight), keyEquivalent: "")
 
+        // Diagnostics submenu
+        let dbgMenu = NSMenu(title: "Диагностика")
+        dbgMenu.addItem(NSMenuItem(title: "Проверить доступ к Accessibility", action: #selector(diagCheckAX), keyEquivalent: ""))
+        dbgMenu.addItem(NSMenuItem(title: "Запросить доступ к Accessibility…", action: #selector(diagPromptAX), keyEquivalent: ""))
+        dbgMenu.addItem(NSMenuItem.separator())
+        dbgMenu.addItem(NSMenuItem(title: "Показать элементы Dock в консоли", action: #selector(diagDumpDock), keyEquivalent: ""))
+        dbgMenu.addItem(NSMenuItem(title: "Принудительно обновить статус", action: #selector(diagForceRefresh), keyEquivalent: ""))
+        let dbgParent = NSMenuItem(title: "Диагностика", action: nil, keyEquivalent: "")
+        menu.setSubmenu(dbgMenu, for: dbgParent)
+        menu.addItem(dbgParent)
+
         menu.addItem(.separator())
         menu.addItem(withTitle: "Выход", action: #selector(quit), keyEquivalent: "q")
 
@@ -257,6 +268,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     }
 
     @objc private func quit() { NSApp.terminate(nil) }
+
+    // MARK: - Diagnostics actions
+    @objc private func diagCheckAX() {
+        let trusted = badgeWatcher.isAXTrusted()
+        print("[overoclock] AX trusted? \(trusted)")
+        let alert = NSAlert()
+        alert.messageText = trusted ? "Accessibility: Разрешение предоставлено" : "Accessibility: Нет разрешения"
+        alert.informativeText = "Если запущено из Xcode, убедитесь, что в System Settings → Privacy & Security → Accessibility добавлено именно собранное overoclock.app из Build/Products/Debug. Для отладки Debug-сборку лучше запускать без App Sandbox."
+        alert.alertStyle = trusted ? .informational : .warning
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
+    }
+
+    @objc private func diagPromptAX() {
+        badgeWatcher.promptAX()
+    }
+
+    @objc private func diagDumpDock() {
+        print("[overoclock] Dumping Dock items…")
+        badgeWatcher.debugDumpDock()
+        let alert = NSAlert()
+        alert.messageText = "Готово"
+        alert.informativeText = "Список элементов Dock и их бейджей выведен в консоль Xcode."
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
+    }
+
+    @objc private func diagForceRefresh() {
+        badgeWatcher.forceRefresh()
+    }
 
     @objc private func resizeToFit() {
         guard let panel = panel, let host = host else { return }
@@ -358,6 +399,22 @@ final class DockBadgeWatcher: ObservableObject {
 
     private func refresh() { hasAttention = anyWatchedAppHasBadge() }
 
+    // Public helpers for diagnostics
+    func isAXTrusted() -> Bool { AXIsProcessTrusted() }
+    func promptAX() {
+        let opts: CFDictionary = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
+        AXIsProcessTrustedWithOptions(opts)
+    }
+    func forceRefresh() { refresh() }
+    func debugDumpDock() {
+        guard let dock = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.dock").first else {
+            print("[overoclock] Dock app not found")
+            return
+        }
+        let dockAX = AXUIElementCreateApplication(dock.processIdentifier)
+        dumpAXTree(element: dockAX, level: 0)
+    }
+
     private func anyWatchedAppHasBadge() -> Bool {
         guard let dock = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.dock").first else { return false }
         let dockAX = AXUIElementCreateApplication(dock.processIdentifier)
@@ -379,10 +436,46 @@ final class DockBadgeWatcher: ObservableObject {
             AXUIElementCopyAttributeValue(child, axStatusLabel, &badgeRef)
             let badge = badgeRef as? String
 
-            if !title.isEmpty, watchedAppTitles.contains(title), let b = badge, !b.isEmpty { return true }
+            if !title.isEmpty, matchesWatchedTitle(title), let b = badge, !b.isEmpty { return true }
             if containsBadgedWatchedItem(in: child) { return true }
         }
         return false
+    }
+
+    private func matchesWatchedTitle(_ title: String) -> Bool {
+        let t = title.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if t.isEmpty { return false }
+        // Exact names (case-insensitive)
+        for w in watchedAppTitles { if t == w.lowercased() { return true } }
+        // Substring match for common variants
+        if t.contains("telegram") || t.contains("телеграм") { return true }
+        return false
+    }
+
+    // MARK: - AX debug dump
+    private func dumpAXTree(element: AXUIElement, level: Int) {
+        var titleRef: CFTypeRef?
+        AXUIElementCopyAttributeValue(element, kAXTitleAttribute as CFString, &titleRef)
+        let title = (titleRef as? String) ?? ""
+
+        var roleRef: CFTypeRef?
+        AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &roleRef)
+        let role = (roleRef as? String) ?? ""
+
+        var badgeRef: CFTypeRef?
+        let axStatusLabel: CFString = "AXStatusLabel" as CFString
+        AXUIElementCopyAttributeValue(element, axStatusLabel, &badgeRef)
+        let badge = badgeRef as? String
+
+        let indent = String(repeating: "  ", count: level)
+        if !title.isEmpty || (badge != nil && !(badge ?? "").isEmpty) {
+            print("[overoclock] \(indent)role=\(role) title=\(title) badge=\(badge ?? "")")
+        }
+
+        var childrenRef: CFTypeRef?
+        let gotChildren = AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &childrenRef)
+        guard gotChildren == .success, let children = childrenRef as? [AXUIElement] else { return }
+        for child in children { dumpAXTree(element: child, level: level + 1) }
     }
 }
 
