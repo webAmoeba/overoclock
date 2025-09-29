@@ -80,6 +80,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         panel.makeKeyAndOrderFront(nil)
         badgeWatcher.start()
         resizeToFit()
+        maybeOfferAXHelp()
         // Launch behavior: if pinned, force top-right; else restore or snap.
         let d = UserDefaults.standard
         if d.object(forKey: kPinnedTopRight) == nil { d.set(true, forKey: kPinnedTopRight) } // default ON
@@ -187,6 +188,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         dbgMenu.addItem(NSMenuItem(title: "Проверить доступ к Accessibility", action: #selector(diagCheckAX), keyEquivalent: ""))
         dbgMenu.addItem(NSMenuItem(title: "Запросить доступ к Accessibility…", action: #selector(diagPromptAX), keyEquivalent: ""))
         dbgMenu.addItem(NSMenuItem.separator())
+        dbgMenu.addItem(NSMenuItem(title: "Открыть настройки Accessibility…", action: #selector(diagOpenAXPane), keyEquivalent: ""))
         dbgMenu.addItem(NSMenuItem(title: "Показать элементы Dock в консоли", action: #selector(diagDumpDock), keyEquivalent: ""))
         dbgMenu.addItem(NSMenuItem(title: "Принудительно обновить статус", action: #selector(diagForceRefresh), keyEquivalent: ""))
         let dbgParent = NSMenuItem(title: "Диагностика", action: nil, keyEquivalent: "")
@@ -289,6 +291,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         badgeWatcher.promptAX()
     }
 
+    @objc private func diagOpenAXPane() {
+        openAccessibilitySettings()
+    }
+
     @objc private func diagDumpDock() {
         print("[overoclock] Dumping Dock items…")
         badgeWatcher.debugDumpDock()
@@ -301,6 +307,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
 
     @objc private func diagForceRefresh() {
         badgeWatcher.forceRefresh()
+    }
+
+    // Offer help to open the Accessibility pane on first launch if not trusted
+    private func maybeOfferAXHelp() {
+        let d = UserDefaults.standard
+        if badgeWatcher.isAXTrusted() { return }
+        if d.bool(forKey: "axHelpOffered") { return }
+        d.set(true, forKey: "axHelpOffered")
+
+        let alert = NSAlert()
+        alert.messageText = "Нужен доступ к Accessibility"
+        alert.informativeText = "Чтобы подсвечивать часы при уведомлениях, разрешите доступ в System Settings → Privacy & Security → Accessibility для overoclock."
+        alert.addButton(withTitle: "Открыть настройки")
+        alert.addButton(withTitle: "Позже")
+        let resp = alert.runModal()
+        if resp == .alertFirstButtonReturn { openAccessibilitySettings() }
+    }
+
+    private func openAccessibilitySettings() {
+        let ws = NSWorkspace.shared
+        // Try direct Privacy_Accessibility pane
+        let urls = [
+            URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"),
+            URL(string: "x-apple.systempreferences:com.apple.preference.security"),
+            URL(string: "x-apple.systempreferences:")
+        ].compactMap { $0 }
+        for u in urls { if ws.open(u) { return } }
     }
 
     @objc private func resizeToFit() {
