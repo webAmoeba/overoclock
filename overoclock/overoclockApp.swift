@@ -315,6 +315,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
 
     // NSWindowDelegate — persist position when user drags
     func windowDidMove(_ notification: Notification) { savePosition() }
+
+    deinit {
+        NotificationCenter.default.removeObserver(self, name: .clockContentChanged, object: nil)
+        NotificationCenter.default.removeObserver(self, name: NSApplication.didChangeScreenParametersNotification, object: nil)
+    }
 }
 
 // MARK: - Helpers
@@ -327,40 +332,38 @@ final class TransparentPanel: NSPanel {
 
 // MARK: - SwiftUI view (black pill, white mono text)
 struct ClockView: View {
-    @State private var now = Date()
-    @AppStorage("showSeconds") private var showSeconds: Bool = false
-    @AppStorage("use24h")     private var use24h: Bool = true
-    @AppStorage("textSize")   private var textSize: Double = 16
-    @AppStorage("opacity")    private var opacity: Double = 1.0   // default: fully black
-    @AppStorage("clickThrough") private var clickThrough: Bool = false
+    @AppStorage("showSeconds")   private var showSeconds: Bool = false
+    @AppStorage("use24h")        private var use24h: Bool = true
+    @AppStorage("textSize")      private var textSize: Double = 16
+    @AppStorage("opacity")       private var opacity: Double = 1.0   // default: fully black
+    @AppStorage("clickThrough")  private var clickThrough: Bool = false
 
-    private var timeFormatter: DateFormatter {
+    private func timeString(for date: Date) -> String {
         let f = DateFormatter()
-        f.locale = Locale.current
+        f.locale = .current
         f.dateFormat = use24h ? (showSeconds ? "HH:mm:ss" : "HH:mm")
                               : (showSeconds ? "h:mm:ss a" : "h:mm a")
-        return f
+        return f.string(from: date)
     }
-    private var timeText: String { timeFormatter.string(from: now) }
 
     var body: some View {
-        ZStack {
-            RoundedRectangle(cornerRadius: 4)
-                .fill(Color.black.opacity(opacity))
-            Text(timeText)
-                .font(.system(size: textSize, weight: .semibold, design: .monospaced))
-                .monospacedDigit()
-                .foregroundColor(.white)
-                .padding(.horizontal, 6)
-                .padding(.vertical, 2)
+        // Update every second when seconds are visible, otherwise once per minute
+        TimelineView(showSeconds ? .periodic(from: .now, by: 1) : .everyMinute) { context in
+            ZStack {
+                RoundedRectangle(cornerRadius: 4)
+                    .fill(Color.black.opacity(opacity))
+                Text(timeString(for: context.date))
+                    .font(.system(size: textSize, weight: .semibold, design: .monospaced))
+                    .monospacedDigit()
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+            }
         }
-        .onReceive(Timer.publish(every: 0.5, on: .main, in: .common).autoconnect()) { _ in
-            now = Date()
-            NotificationCenter.default.post(name: .clockContentChanged, object: nil)
-        }
-        .onChange(of: textSize)   { _, _ in NotificationCenter.default.post(name: .clockContentChanged, object: nil) }
-        .onChange(of: use24h)     { _, _ in NotificationCenter.default.post(name: .clockContentChanged, object: nil) }
-        .onChange(of: showSeconds){ _, _ in NotificationCenter.default.post(name: .clockContentChanged, object: nil) }
+        // Only post when size-affecting settings change
+        .onChange(of: textSize)    { _, _ in NotificationCenter.default.post(name: .clockContentChanged, object: nil) }
+        .onChange(of: use24h)      { _, _ in NotificationCenter.default.post(name: .clockContentChanged, object: nil) }
+        .onChange(of: showSeconds) { _, _ in NotificationCenter.default.post(name: .clockContentChanged, object: nil) }
         .onAppear {
             setIgnoresMouseEvents(clickThrough)
             NotificationCenter.default.post(name: .clockContentChanged, object: nil)
