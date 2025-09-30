@@ -19,7 +19,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     private let badgeWatcher = DockBadgeWatcher()
     private var pendingResize = false
     // Fullscreen handling
-    private let fullscreenOffsetX: CGFloat = 24
 
     // Shared keys with SwiftUI @AppStorage
     private let kShowSeconds    = "showSeconds"
@@ -35,6 +34,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     private let kPinnedTopRight = "pinnedTopRight"
     // Window level preference (NSWindow.Level rawValue)
     private let kWindowLevel    = "windowLevel"
+    // Fullscreen offset (in points)
+    private let kFullscreenOffsetX = "fullscreenOffsetX"
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Hide from Dock, keep menu-bar presence
@@ -93,6 +94,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         // Launch behavior: if pinned, force top-right; else restore or snap.
         let d = UserDefaults.standard
         if d.object(forKey: kPinnedTopRight) == nil { d.set(true, forKey: kPinnedTopRight) } // default ON
+        if d.object(forKey: kFullscreenOffsetX) == nil { d.set(0, forKey: kFullscreenOffsetX) } // default: no offset
         if d.bool(forKey: kPinnedTopRight) {
             resetPositionTopRight()
         } else if !restorePositionIfAvailable() {
@@ -208,6 +210,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         menu.setSubmenu(lvlMenu, for: lvlParent)
         menu.addItem(lvlParent)
 
+        // Fullscreen offset submenu
+        let offMenu = NSMenu(title: "Смещение на полноэкране")
+        let offValues: [Int] = [0, 12, 24, 36]
+        let currentOff = UserDefaults.standard.object(forKey: kFullscreenOffsetX) as? Int ?? 0
+        for v in offValues {
+            let title = v == 0 ? "Не смещать" : "Смещать на \(v) pt"
+            let it = NSMenuItem(title: title, action: #selector(setFullscreenOffsetFromMenu(_:)), keyEquivalent: "")
+            it.tag = v
+            it.state = (currentOff == v) ? .on : .off
+            offMenu.addItem(it)
+        }
+        let offParent = NSMenuItem(title: "Смещать на полноэкранах на", action: nil, keyEquivalent: "")
+        menu.setSubmenu(offMenu, for: offParent)
+        menu.addItem(offParent)
+
         // Watch mode removed — реагируем на любой бейдж по умолчанию
 
         // Position controls
@@ -317,6 +334,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     @objc private func setLevelStatusBar()   { setWindowLevel(.statusBar) }
     @objc private func setLevelPopUpMenu()   { setWindowLevel(.popUpMenu) }
     @objc private func setLevelScreenSaver() { setWindowLevel(.screenSaver) }
+
+    // MARK: - Fullscreen offset actions
+    @objc private func setFullscreenOffsetFromMenu(_ sender: NSMenuItem) {
+        let v = max(0, sender.tag)
+        UserDefaults.standard.set(v, forKey: kFullscreenOffsetX)
+        nudgeIfFullscreen()
+    }
 
     // No watch mode toggle: всегда реагируем на любой бейдж Dock
 
@@ -466,7 +490,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         guard d.bool(forKey: kPinnedTopRight) else { return }
         guard let scr = panel?.screen ?? targetScreen() ?? NSScreen.main else { return }
         let isFS = isAnyFullscreen(on: scr)
-        if isFS { _ = positionTopRight(marginX: fullscreenOffsetX, marginY: 0) }
+        let dx = CGFloat(UserDefaults.standard.object(forKey: kFullscreenOffsetX) as? Int ?? 0)
+        if isFS && dx > 0 { _ = positionTopRight(marginX: dx, marginY: 0) }
         else { _ = positionTopRight(marginX: 0, marginY: 0) }
     }
 
