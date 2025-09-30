@@ -17,6 +17,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     private var host: NSHostingView<ClockView>?
     private var statusItem: NSStatusItem!
     private let badgeWatcher = DockBadgeWatcher()
+    private var pendingResize = false
     // Fullscreen handling
     private let fullscreenOffsetX: CGFloat = 24
 
@@ -87,7 +88,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         applyWindowLevel()
         panel.makeKeyAndOrderFront(nil)
         badgeWatcher.start()
-        resizeToFit()
+        _resizeToFitNow()
         maybeOfferAXHelp()
         // Launch behavior: if pinned, force top-right; else restore or snap.
         let d = UserDefaults.standard
@@ -380,9 +381,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         for u in urls { if ws.open(u) { return } }
     }
 
+    // Debounced resize to avoid re-entrant layout during SwiftUI updates
     @objc private func resizeToFit() {
+        if pendingResize { return }
+        pendingResize = true
+        DispatchQueue.main.async { [weak self] in
+            self?._resizeToFitNow()
+            self?.pendingResize = false
+        }
+    }
+
+    private func _resizeToFitNow() {
         guard let panel = panel, let host = host else { return }
-        host.layoutSubtreeIfNeeded()
         var size = host.fittingSize
         size.width = ceil(size.width)
         size.height = ceil(size.height)
@@ -454,28 +464,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     private func nudgeIfFullscreen() {
         let d = UserDefaults.standard
         guard d.bool(forKey: kPinnedTopRight) else { return }
-        guard targetScreen() != nil else { return }
-        let isFS = isFrontmostAppFullscreen()
-        if isFS {
-            _ = positionTopRight(marginX: fullscreenOffsetX, marginY: 0)
-        } else {
-            _ = positionTopRight(marginX: 0, marginY: 0)
-        }
+        guard let scr = panel?.screen ?? targetScreen() ?? NSScreen.main else { return }
+        let isFS = isAnyFullscreen(on: scr)
+        if isFS { _ = positionTopRight(marginX: fullscreenOffsetX, marginY: 0) }
+        else { _ = positionTopRight(marginX: 0, marginY: 0) }
     }
 
-    private func isFrontmostAppFullscreen() -> Bool {
+    private func isAnyFullscreen(on screen: NSScreen) -> Bool {
         guard AXIsProcessTrusted() else { return false }
-        guard let app = NSWorkspace.shared.frontmostApplication else { return false }
-        let axApp = AXUIElementCreateApplication(app.processIdentifier)
-        // Prefer focused window
-        var focusedRef: CFTypeRef?
-        let focusedOK = AXUIElementCopyAttributeValue(axApp, kAXFocusedWindowAttribute as CFString, &focusedRef)
-        if focusedOK == .success, let win = castToAXElement(focusedRef), isAXWindowFullscreen(win) { return true }
-        // Fallback: scan windows
-        var windowsRef: CFTypeRef?
-        if AXUIElementCopyAttributeValue(axApp, kAXWindowsAttribute as CFString, &windowsRef) == .success {
-            let wins = castToAXElements(windowsRef)
-            for w in wins { if isAXWindowFullscreen(w) { return true } }
+        let apps = NSWorkspace.shared.runningApplications.filter { $0.activationPolicy == .regular && !$0.isTerminated }
+        for app in apps {
+            let axApp = AXUIElementCreateApplication(app.processIdentifier)
+            var windowsRef: CFTypeRef?
+            if AXUIElementCopyAttributeValue(axApp, kAXWindowsAttribute as CFString, &windowsRef) == .success {
+                let wins = castToAXElements(windowsRef)
+                for w in wins {
+                    if isAXWindowFullscreen(w) {
+                        if let frame = axWindowFrame(w), frameIntersectsScreen(frame, screen: screen) { return true }
+                    }
+                }
+            }
         }
         return false
     }
@@ -488,6 +496,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             if AXUIElementCopyAttributeValue(window, key, &fsRef) == .success, let b = fsRef as? Bool { if b { return true } }
         }
         return false
+    }
+
+    private func axWindowFrame(_ window: AXUIElement) -> CGRect? {
+        var posRef: CFTypeRef?
+        var sizeRef: CFTypeRef?
+        _ = AXUIElementCopyAttributeValue(window, kAXPositionAttribute as CFString, &posRef)
+        _ = AXUIElementCopyAttributeValue(window, kAXSizeAttribute as CFString, &sizeRef)
+        guard let p = axCGPoint(posRef), let s = axCGSize(sizeRef) else { return nil }
+        return CGRect(origin: p, size: s)
+    }
+
+    private func axCGPoint(_ value: CFTypeRef?) -> CGPoint? {
+        guard let v = value, CFGetTypeID(v) == AXValueGetTypeID() else { return nil }
+        let ax = v as! AXValue
+        if AXValueGetType(ax) == .cgPoint {
+            var pt = CGPoint.zero
+            if AXValueGetValue(ax, .cgPoint, &pt) { return pt }
+        }
+        return nil
+    }
+
+    private func axCGSize(_ value: CFTypeRef?) -> CGSize? {
+        guard let v = value, CFGetTypeID(v) == AXValueGetTypeID() else { return nil }
+        let ax = v as! AXValue
+        if AXValueGetType(ax) == .cgSize {
+            var sz = CGSize.zero
+            if AXValueGetValue(ax, .cgSize, &sz) { return sz }
+        }
+        return nil
+    }
+
+    private func frameIntersectsScreen(_ frame: CGRect, screen: NSScreen) -> Bool {
+        return frame.intersects(screen.frame)
     }
 }
 
