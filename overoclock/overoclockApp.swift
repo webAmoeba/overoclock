@@ -17,6 +17,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     private var host: NSHostingView<ClockView>?
     private var statusItem: NSStatusItem!
     private let badgeWatcher = DockBadgeWatcher()
+    // Fullscreen handling
+    private let fullscreenOffsetX: CGFloat = 24
 
     // Shared keys with SwiftUI @AppStorage
     private let kShowSeconds    = "showSeconds"
@@ -30,6 +32,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     private let kUseCustomPos   = "useCustomPos"
     // Pinning
     private let kPinnedTopRight = "pinnedTopRight"
+    // Window level preference (NSWindow.Level rawValue)
+    private let kWindowLevel    = "windowLevel"
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Hide from Dock, keep menu-bar presence
@@ -76,7 +80,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         // Observers
         NotificationCenter.default.addObserver(self, selector: #selector(resizeToFit), name: .clockContentChanged, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(screenParamsChanged), name: NSApplication.didChangeScreenParametersNotification, object: nil)
+        NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(frontAppChanged), name: NSWorkspace.didActivateApplicationNotification, object: nil)
+        NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(activeSpaceChanged), name: NSWorkspace.activeSpaceDidChangeNotification, object: nil)
 
+        // Apply preferred window level (after panel is created)
+        applyWindowLevel()
         panel.makeKeyAndOrderFront(nil)
         badgeWatcher.start()
         resizeToFit()
@@ -91,6 +99,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         }
         applyClickThrough()
         updateDraggability()
+        // Initial nudge if fullscreen is active
+        nudgeIfFullscreen()
     }
 
     // MARK: - Positioning
@@ -124,12 +134,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         let d = UserDefaults.standard
         if d.bool(forKey: kPinnedTopRight) {
             resetPositionTopRight() // pins again
+            nudgeIfFullscreen()
         } else if d.bool(forKey: kUseCustomPos) {
             if !restorePositionIfAvailable() { snapTopRightReliably() }
         } else {
             snapTopRightReliably()
         }
     }
+
+    @objc private func frontAppChanged(_ n: Notification) { nudgeIfFullscreen() }
+    @objc private func activeSpaceChanged(_ n: Notification) { nudgeIfFullscreen() }
 
     // MARK: - Menu
     private func rebuildMenu() {
@@ -176,6 +190,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         let pinItem = NSMenuItem(title: "Прибить к правому верхнему (авто)", action: #selector(togglePinned), keyEquivalent: "")
         pinItem.state = d.bool(forKey: kPinnedTopRight) ? .on : .off
         menu.addItem(pinItem)
+
+        // Window level submenu
+        let lvlMenu = NSMenu(title: "Уровень окна")
+        let currentLevel = UserDefaults.standard.object(forKey: kWindowLevel) as? Int ?? NSWindow.Level.statusBar.rawValue
+        let makeItem: (String, Selector, NSWindow.Level) -> NSMenuItem = { title, action, level in
+            let it = NSMenuItem(title: title, action: action, keyEquivalent: "")
+            it.state = (currentLevel == level.rawValue) ? .on : .off
+            return it
+        }
+        lvlMenu.addItem(makeItem("Статус‑бар (по умолчанию)", #selector(setLevelStatusBar), .statusBar))
+        lvlMenu.addItem(makeItem("Всплывающее меню (выше)", #selector(setLevelPopUpMenu), .popUpMenu))
+        lvlMenu.addItem(NSMenuItem.separator())
+        lvlMenu.addItem(makeItem("Экстремально высокий (Screen Saver)", #selector(setLevelScreenSaver), .screenSaver))
+        let lvlParent = NSMenuItem(title: "Уровень окна", action: nil, keyEquivalent: "")
+        menu.setSubmenu(lvlMenu, for: lvlParent)
+        menu.addItem(lvlParent)
 
         // Watch mode removed — реагируем на любой бейдж по умолчанию
 
@@ -273,6 +303,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
 
     @objc private func quit() { NSApp.terminate(nil) }
 
+    // MARK: - Window level helpers
+    private func applyWindowLevel() {
+        guard let panel = panel else { return }
+        let raw = UserDefaults.standard.object(forKey: kWindowLevel) as? Int ?? NSWindow.Level.statusBar.rawValue
+        panel.level = NSWindow.Level(rawValue: raw)
+    }
+    private func setWindowLevel(_ level: NSWindow.Level) {
+        UserDefaults.standard.set(level.rawValue, forKey: kWindowLevel)
+        applyWindowLevel()
+    }
+    @objc private func setLevelStatusBar()   { setWindowLevel(.statusBar) }
+    @objc private func setLevelPopUpMenu()   { setWindowLevel(.popUpMenu) }
+    @objc private func setLevelScreenSaver() { setWindowLevel(.screenSaver) }
+
     // No watch mode toggle: всегда реагируем на любой бейдж Dock
 
     // MARK: - Diagnostics actions
@@ -351,6 +395,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         panel.setContentSize(size)
         if pinned {
             snapTopRightReliably()
+            nudgeIfFullscreen()
         } else if hadCustom {
             panel.setFrameOrigin(NSPoint(x: oldOrigin.x, y: oldOrigin.y))
         } else {
@@ -401,6 +446,48 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         badgeWatcher.stop()
         NotificationCenter.default.removeObserver(self, name: .clockContentChanged, object: nil)
         NotificationCenter.default.removeObserver(self, name: NSApplication.didChangeScreenParametersNotification, object: nil)
+        NSWorkspace.shared.notificationCenter.removeObserver(self, name: NSWorkspace.didActivateApplicationNotification, object: nil)
+        NSWorkspace.shared.notificationCenter.removeObserver(self, name: NSWorkspace.activeSpaceDidChangeNotification, object: nil)
+    }
+
+    // MARK: - Fullscreen awareness: shift left when front app is fullscreen (only when pinned)
+    private func nudgeIfFullscreen() {
+        let d = UserDefaults.standard
+        guard d.bool(forKey: kPinnedTopRight) else { return }
+        guard targetScreen() != nil else { return }
+        let isFS = isFrontmostAppFullscreen()
+        if isFS {
+            _ = positionTopRight(marginX: fullscreenOffsetX, marginY: 0)
+        } else {
+            _ = positionTopRight(marginX: 0, marginY: 0)
+        }
+    }
+
+    private func isFrontmostAppFullscreen() -> Bool {
+        guard AXIsProcessTrusted() else { return false }
+        guard let app = NSWorkspace.shared.frontmostApplication else { return false }
+        let axApp = AXUIElementCreateApplication(app.processIdentifier)
+        // Prefer focused window
+        var focusedRef: CFTypeRef?
+        let focusedOK = AXUIElementCopyAttributeValue(axApp, kAXFocusedWindowAttribute as CFString, &focusedRef)
+        if focusedOK == .success, let win = castToAXElement(focusedRef), isAXWindowFullscreen(win) { return true }
+        // Fallback: scan windows
+        var windowsRef: CFTypeRef?
+        if AXUIElementCopyAttributeValue(axApp, kAXWindowsAttribute as CFString, &windowsRef) == .success {
+            let wins = castToAXElements(windowsRef)
+            for w in wins { if isAXWindowFullscreen(w) { return true } }
+        }
+        return false
+    }
+
+    private func isAXWindowFullscreen(_ window: AXUIElement) -> Bool {
+        // Try AXFullScreen (common) then AXFullscreen spelling
+        var fsRef: CFTypeRef?
+        let keys: [CFString] = ["AXFullScreen" as CFString, "AXFullscreen" as CFString]
+        for key in keys {
+            if AXUIElementCopyAttributeValue(window, key, &fsRef) == .success, let b = fsRef as? Bool { if b { return true } }
+        }
+        return false
     }
 }
 
@@ -469,7 +556,8 @@ final class DockBadgeWatcher: ObservableObject {
     private func containsBadgedWatchedItem(in element: AXUIElement) -> Bool {
         var childrenRef: CFTypeRef?
         let gotChildren = AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &childrenRef)
-        guard gotChildren == .success, let children = childrenRef as? [AXUIElement] else { return false }
+        guard gotChildren == .success else { return false }
+        let children = castToAXElements(childrenRef)
         for child in children {
             var titleRef: CFTypeRef?
             AXUIElementCopyAttributeValue(child, kAXTitleAttribute as CFString, &titleRef)
@@ -517,7 +605,8 @@ final class DockBadgeWatcher: ObservableObject {
 
         var childrenRef: CFTypeRef?
         let gotChildren = AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &childrenRef)
-        guard gotChildren == .success, let children = childrenRef as? [AXUIElement] else { return }
+        guard gotChildren == .success else { return }
+        let children = castToAXElements(childrenRef)
         for child in children { dumpAXTree(element: child, level: level + 1) }
     }
 }
@@ -550,6 +639,27 @@ final class TransparentPanel: NSPanel {
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { false }
 }
+
+// MARK: - CoreFoundation casting helpers (avoid 'always succeeds' warnings)
+@inline(__always) private func castToAXElement(_ ref: CFTypeRef?) -> AXUIElement? {
+    guard let r = ref, CFGetTypeID(r) == AXUIElementGetTypeID() else { return nil }
+    // Force-cast after runtime type check to avoid conditional cast warnings
+    return (r as! AXUIElement)
+}
+
+    @inline(__always) private func castToAXElements(_ ref: CFTypeRef?) -> [AXUIElement] {
+        guard let r = ref else { return [] }
+        // Expect CFArray of AXUIElement
+        if CFGetTypeID(r) != CFArrayGetTypeID() { return [] }
+        let anyObjects = (r as! [AnyObject])
+        var result: [AXUIElement] = []
+        result.reserveCapacity(anyObjects.count)
+        for obj in anyObjects {
+            let cf = obj as CFTypeRef
+            if CFGetTypeID(cf) == AXUIElementGetTypeID() { result.append(obj as! AXUIElement) }
+        }
+        return result
+    }
 
 // MARK: - SwiftUI view (black pill, white mono text)
 struct ClockView: View {
