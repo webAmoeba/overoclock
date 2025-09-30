@@ -580,10 +580,18 @@ struct ClockView: View {
                     .padding(.vertical, 2)
             }
         }
-        // Only post when size-affecting settings change
-        .onChange(of: textSize)    { _ in NotificationCenter.default.post(name: .clockContentChanged, object: nil) }
-        .onChange(of: use24h)      { _ in fmt.update(use24h: use24h, showSeconds: showSeconds); NotificationCenter.default.post(name: .clockContentChanged, object: nil) }
-        .onChange(of: showSeconds) { _ in fmt.update(use24h: use24h, showSeconds: showSeconds); NotificationCenter.default.post(name: .clockContentChanged, object: nil) }
+        // Only post when size-affecting settings change (SwiftUI macOS 14+ API)
+        .onChange(of: textSize) {
+            NotificationCenter.default.post(name: .clockContentChanged, object: nil)
+        }
+        .onChange(of: use24h) {
+            fmt.update(use24h: use24h, showSeconds: showSeconds)
+            NotificationCenter.default.post(name: .clockContentChanged, object: nil)
+        }
+        .onChange(of: showSeconds) {
+            fmt.update(use24h: use24h, showSeconds: showSeconds)
+            NotificationCenter.default.post(name: .clockContentChanged, object: nil)
+        }
         .onAppear {
             fmt.update(use24h: use24h, showSeconds: showSeconds)
             setIgnoresMouseEvents(clickThrough)
